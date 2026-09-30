@@ -7,6 +7,7 @@ RUN apk add --no-cache --virtual .build-deps gcc musl-dev libffi-dev \
  && apk del .build-deps \
  && rm -rf /root/.cache/pip
 COPY app/app.py .
+RUN chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8080
 CMD ["python", "app.py"]
