@@ -1,23 +1,40 @@
-"""API Flask que lee un secreto desde Azure Key Vault (DefaultAzureCredential)."""
+"""API Flask que lee un secreto desde AWS Secrets Manager (credenciales IAM / env)."""
 import os
 from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-VAULT_URL = os.getenv("AZURE_KEYVAULT_URL", "")
-SECRET_NAME = os.getenv("AZURE_SECRET_NAME", "db-connection-string")
+SECRET_NAME = os.getenv("AWS_SECRET_NAME", "devsecops/db-connection-string")
+AWS_REGION = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "eu-west-1"))
+USE_SECRETS_MANAGER = os.getenv("USE_AWS_SECRETS_MANAGER", "1") == "1"
 
 
-def get_secret() -> str:
-    """Obtiene el secreto desde Key Vault. Credenciales vía DefaultAzureCredential / env."""
-    if not VAULT_URL:
-        # Fallback local solo para demos sin vault (no usar en prod)
-        return os.getenv("DB_CONNECTION_STRING", "")
-    from azure.identity import DefaultAzureCredential
-    from azure.keyvault.secrets import SecretClient
+def get_secret() -> tuple[str, str]:
+    """Devuelve (valor, source). Credenciales vía IAM role / ~/.aws / env (sin secretos en código)."""
+    if not USE_SECRETS_MANAGER:
+        return os.getenv("DB_CONNECTION_STRING", ""), "env"
 
-    client = SecretClient(vault_url=VAULT_URL, credential=DefaultAzureCredential())
-    return client.get_secret(SECRET_NAME).value
+    import boto3
+    from botocore.exceptions import ClientError
+
+    client = boto3.client("secretsmanager", region_name=AWS_REGION)
+    try:
+        resp = client.get_secret_value(SecretId=SECRET_NAME)
+        return resp.get("SecretString") or "", "secretsmanager"
+    except ClientError as exc:
+        # Fallback solo para demos locales si el secreto no es accesible
+        fallback = os.getenv("DB_CONNECTION_STRING", "")
+        if fallback:
+            return fallback, "env-fallback"
+        raise RuntimeError(f"No se pudo leer el secreto: {exc}") from exc
+
+
+def mask(secret: str) -> str:
+    if not secret:
+        return "missing"
+    if len(secret) > 8:
+        return secret[:4] + "****" + secret[-4:]
+    return "****"
 
 
 @app.get("/")
@@ -32,14 +49,13 @@ def health():
 
 @app.get("/config")
 def config():
-    secret = get_secret()
-    # Nunca devolver el secreto completo en claro en producción; aquí se enmascara para evidencia
-    masked = (secret[:4] + "****" + secret[-4:]) if secret and len(secret) > 8 else ("****" if secret else "missing")
+    secret, source = get_secret()
     return jsonify(
-        vault=VAULT_URL or "env-fallback",
+        provider="aws-secrets-manager",
+        region=AWS_REGION,
         secret_name=SECRET_NAME,
-        secret_masked=masked,
-        source="keyvault" if VAULT_URL else "env",
+        secret_masked=mask(secret),
+        source=source,
     )
 
 
